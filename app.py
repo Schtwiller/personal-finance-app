@@ -43,6 +43,7 @@ current working directory.
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
@@ -57,6 +58,16 @@ import matplotlib.pyplot as plt
 
 from database import Database
 
+try:
+    # Pillow is used for loading and displaying the custom background image.
+    from PIL import Image, ImageTk  # type: ignore
+except ImportError:
+    # If Pillow is not installed, the application will still run but without a
+    # background image.  Users should install Pillow via requirements.txt for
+    # the full experience.
+    Image = None  # type: ignore
+    ImageTk = None  # type: ignore
+
 
 class FinanceApp:
     """Main application class encapsulating the Tkinter GUI."""
@@ -65,8 +76,69 @@ class FinanceApp:
         self.root = root
         self.root.title("Personal Finance Manager")
         self.db = Database()
-        # Configure root window minimum size
+        # Fix the window size to fit our background image.  A non‑resizable
+        # window ensures that the background does not stretch awkwardly.
         self.root.geometry("900x600")
+        self.root.resizable(False, False)
+
+        # Attempt to set a custom aquarium background.  If Pillow is not
+        # available or the image cannot be loaded, this step is skipped and
+        # the default Tkinter background is used instead.
+        if Image is not None and ImageTk is not None:
+            try:
+                # The background image is expected to live alongside this script in
+                # the repository root.  If you wish to place it in a different
+                # directory, adjust this path accordingly.
+                img_path = os.path.join(os.path.dirname(__file__), "aquarium_background.png")
+                image = Image.open(img_path)
+                # Resize the image to match the window dimensions
+                image = image.resize((900, 600), Image.LANCZOS)
+                self.bg_photo = ImageTk.PhotoImage(image)
+                self.background_label = tk.Label(self.root, image=self.bg_photo)
+                # Place the label behind all other widgets
+                self.background_label.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                # Fallback: no background image
+                self.bg_photo = None  # type: ignore
+        # Apply a custom style to give the UI a softer, aquatic feel.  This
+        # includes pastel backgrounds, coloured notebook tabs and accent
+        # colours for buttons and table headings.  The 'clam' theme provides
+        # better support for background colours across widgets compared to the
+        # default theme.
+        self.style = ttk.Style()
+        try:
+            self.style.theme_use('clam')
+        except Exception:
+            # If the clam theme is unavailable (very rare), fall back to the
+            # default theme.
+            pass
+        # General backgrounds
+        pastel_bg = '#eaf7fc'
+        accent_bg = '#0582ca'
+        accent_fg = '#ffffff'
+        self.style.configure('.', background=pastel_bg)
+        self.style.configure('TFrame', background=pastel_bg)
+        self.style.configure('TLabelframe', background=pastel_bg, foreground='#02538e')
+        self.style.configure('TLabelframe.Label', background=pastel_bg, foreground='#02538e')
+        self.style.configure('TNotebook', background=pastel_bg, borderwidth=0)
+        self.style.configure('TNotebook.Tab', background=accent_bg, foreground=accent_fg)
+        self.style.map('TNotebook.Tab',
+                       background=[('selected', '#027abf')],
+                       foreground=[('selected', '#ffffff')])
+        self.style.configure('TButton', background=accent_bg, foreground=accent_fg, font=('Arial', 9, 'bold'))
+        # Treeview styling
+        self.style.configure('Treeview',
+                             background=pastel_bg,
+                             fieldbackground=pastel_bg,
+                             foreground='#004d40',
+                             rowheight=24)
+        self.style.configure('Treeview.Heading',
+                             background=accent_bg,
+                             foreground=accent_fg,
+                             font=('Arial', 9, 'bold'))
+        self.style.map('Treeview',
+                       background=[('selected', '#b2ebf2')],
+                       foreground=[('selected', '#004d40')])
 
         # Create the notebook (tab control)
         self.notebook = ttk.Notebook(self.root)
@@ -93,6 +165,8 @@ class FinanceApp:
         self.refresh_transactions()
         self.refresh_budgets()
         self.refresh_summary()
+        # Populate the category combobox options
+        self.refresh_category_options()
 
     # ------------------------------------------------------------------
     # Transactions tab
@@ -117,8 +191,11 @@ class FinanceApp:
 
         # Category entry
         ttk.Label(frame_form, text="Category:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
-        self.entry_category = ttk.Entry(frame_form)
-        self.entry_category.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        # Use a combobox for categories to help users select from previously used
+        # categories.  The values are populated dynamically via
+        # refresh_category_options().  Users can still type their own category.
+        self.combo_category = ttk.Combobox(frame_form, values=[], state="normal")
+        self.combo_category.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         # Description entry
         ttk.Label(frame_form, text="Description:").grid(row=1, column=2, padx=5, pady=5, sticky="e")
@@ -168,7 +245,10 @@ class FinanceApp:
         """Validate input and add a transaction to the database."""
         date_str = self.entry_date.get().strip()
         type_ = self.combo_type.get()
-        category = self.entry_category.get().strip()
+        # Retrieve the category from the combobox.  If the user selects an
+        # existing category, it will be returned; otherwise, any manually
+        # entered text is preserved.
+        category = self.combo_category.get().strip()
         description = self.entry_description.get().strip()
         amount_str = self.entry_amount.get().strip()
 
@@ -204,13 +284,14 @@ class FinanceApp:
             return
 
         # Clear input fields for convenience
-        self.entry_category.delete(0, tk.END)
+        self.combo_category.set("")
         self.entry_description.delete(0, tk.END)
         self.entry_amount.delete(0, tk.END)
         # Optionally keep the date and type for next entry
 
         self.refresh_transactions()
         self.refresh_summary()
+        self.refresh_category_options()
         messagebox.showinfo("Success", "Transaction added successfully.")
 
     def refresh_transactions(self) -> None:
@@ -223,6 +304,29 @@ class FinanceApp:
             # Format amount to two decimal places
             formatted_amount = f"{row[5]:.2f}"
             self.tree_transactions.insert("", tk.END, values=(row[0], row[1], row[2], row[3], row[4], formatted_amount))
+
+    def refresh_category_options(self) -> None:
+        """Populate the category combobox with distinct categories from the database.
+
+        This method extracts the list of categories from the transactions table via
+        `Database.get_categories()`, sorts them alphabetically and updates the
+        values of the category combobox.  It is safe to call this before the
+        combobox is created; in that case the method does nothing.
+        """
+        # Only proceed if the combobox exists (it is created in
+        # build_transactions_tab).  hasattr is used instead of attribute check to
+        # avoid AttributeError during initialisation.
+        if not hasattr(self, 'combo_category'):
+            return
+        try:
+            categories = [row[0] for row in self.db.get_categories()]
+        except Exception:
+            categories = []
+        # Remove empty strings and duplicates and sort alphabetically
+        categories = sorted({cat for cat in categories if cat})
+        # Update combobox values; if the current value is not in the list, it will
+        # still display the typed text without affecting the dropdown options.
+        self.combo_category['values'] = categories
 
     def delete_selected_transaction(self) -> None:
         """Delete the transaction currently selected in the treeview."""
